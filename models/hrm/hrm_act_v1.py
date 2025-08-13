@@ -165,17 +165,36 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         # Scale
         return self.embed_scale * embedding
 
-    def empty_carry(self, batch_size: int):
+    def empty_carry(self, batch_size: int, device=None):
+        if device is None:
+            device = self.H_init.device
         return HierarchicalReasoningModel_ACTV1InnerCarry(
-            z_H=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
-            z_L=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
+            z_H=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype, device=device),
+            z_L=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype, device=device),
         )
         
     def reset_carry(self, reset_flag: torch.Tensor, carry: HierarchicalReasoningModel_ACTV1InnerCarry):
-        return HierarchicalReasoningModel_ACTV1InnerCarry(
-            z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
-            z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
-        )
+        """Reset sequences whose flag is True to the learned initial states.
+
+        Parameters
+        ----------
+        reset_flag : torch.Tensor (batch,)
+            Boolean tensor; True where sequence should be reset.
+        carry : HierarchicalReasoningModel_ACTV1InnerCarry
+            Previous inner carry state.
+        """
+        device = carry.z_H.device
+        reset_flag = reset_flag.to(device)
+
+        # Expand learned init vectors to full sequence length for broadcasting in where
+        seq_len_total = carry.z_H.shape[1]
+        H_init_full = self.H_init.to(device).view(1, 1, -1).expand(reset_flag.shape[0], seq_len_total, -1)
+        L_init_full = self.L_init.to(device).view(1, 1, -1).expand(reset_flag.shape[0], seq_len_total, -1)
+
+        mask = reset_flag.view(-1, 1, 1)  # (batch,1,1)
+        new_z_H = torch.where(mask, H_init_full, carry.z_H)
+        new_z_L = torch.where(mask, L_init_full, carry.z_L)
+        return HierarchicalReasoningModel_ACTV1InnerCarry(z_H=new_z_H, z_L=new_z_L)
 
     def forward(self, carry: HierarchicalReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[HierarchicalReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         seq_info = dict(
@@ -229,10 +248,10 @@ class HierarchicalReasoningModel_ACTV1(nn.Module):
         batch_size = batch["inputs"].shape[0]
 
         return HierarchicalReasoningModel_ACTV1Carry(
-            inner_carry=self.inner.empty_carry(batch_size),  # Empty is expected, it will be reseted in first pass as all sequences are halted.
+            inner_carry=self.inner.empty_carry(batch_size, device=batch["inputs"].device),  # Allocate on batch device
             
-            steps=torch.zeros((batch_size, ), dtype=torch.int32),
-            halted=torch.ones((batch_size, ), dtype=torch.bool),  # Default to halted
+            steps=torch.zeros((batch_size, ), dtype=torch.int32, device=batch["inputs"].device),
+            halted=torch.ones((batch_size, ), dtype=torch.bool, device=batch["inputs"].device),  # Default to halted
             
             current_data={k: torch.empty_like(v) for k, v in batch.items()}
         )

@@ -1,4 +1,6 @@
 torch
+# Optional (CUDA only): flash-attn / flash_attention_interface for faster attention.
+# On macOS / CPU these are skipped automatically.
 adam-atan2
 einops
 tqdm
@@ -9,3 +11,4 @@ wandb
 omegaconf
 hydra-core
 huggingface_hub
+Pillow

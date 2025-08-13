@@ -12,6 +12,44 @@ These results underscore HRM’s potential as a transformative advancement towar
 
 ### Prerequisites ⚙️
 
+This project now supports:
+
+* Linux + NVIDIA CUDA (original path)
+* macOS (Apple Silicon M3/M4) using PyTorch MPS backend (FlashAttention disabled, falls back to PyTorch SDPA)
+* CPU (debug only; slow)
+
+Device is auto-detected (CUDA -> MPS -> CPU) or can be forced with `HRM_DEVICE` env var (e.g. `HRM_DEVICE=cpu`).
+
+#### macOS (Apple Silicon) Setup
+
+Install a recent PyTorch (2.3+ recommended) with MPS support:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install torch --index-url https://download.pytorch.org/whl/cpu  # or universal2 wheel
+pip install -r requirements.txt
+```
+
+FlashAttention is skipped automatically on MPS; attention uses PyTorch's `scaled_dot_product_attention`.
+
+Optional: to disable `torch.compile` (some PyTorch/macOS combos have issues), set:
+
+```bash
+export DISABLE_COMPILE=1
+```
+
+Run a quick smoke test:
+
+```bash
+python - <<'PY'
+import torch; print('Device:', 'cuda' if torch.cuda.is_available() else 'mps' if (hasattr(torch.backends,'mps') and torch.backends.mps.is_available()) else 'cpu')
+PY
+```
+
+#### Linux + CUDA
+
 Ensure PyTorch and CUDA are installed. The repo needs CUDA extensions to be built. If not present, run the following commands:
 
 ```bash
@@ -32,7 +70,7 @@ pip3 install torch torchvision torchaudio --index-url $PYTORCH_INDEX_URL
 pip3 install packaging ninja wheel setuptools setuptools-scm
 ```
 
-Then install FlashAttention. For Hopper GPUs, install FlashAttention 3
+Then install FlashAttention (optional). For Hopper GPUs, install FlashAttention 3
 
 ```bash
 git clone git@github.com:Dao-AILab/flash-attention.git
@@ -83,6 +121,61 @@ Runtime: ~10 hours on a RTX 4070 laptop GPU
  - [Maze 30x30 Hard (1000 examples)](https://huggingface.co/sapientinc/HRM-checkpoint-maze-30x30-hard)
 
 To use the checkpoints, see Evaluation section below.
+
+## Interactive Visualization & GIF Generation 🖼️
+
+You can introspect the model's step‑wise reasoning process for each domain (Sudoku, Maze, ARC) via lightweight CLI tools. Each visualizer can render per‑step token updates with color‑coded diffs and will, by default, produce an animated GIF (unless `--no-gif` is passed). Helper scripts (`viz_*_latest.sh`) auto‑discover the most recent compatible checkpoint and dataset – zero arguments needed.
+
+Color semantics (terminal):
+* Green: token became correct this step
+* Cyan: token changed but still incorrect
+* Dim: token unchanged
+
+Available scripts:
+* `scripts/visualize_sudoku_cli.py`
+* `scripts/visualize_maze_cli.py` (supports stochastic sampling via `--sample-temp >0`)
+* `scripts/visualize_arc_cli.py`
+* Convenience wrappers: `scripts/viz_sudoku_latest.sh`, `scripts/viz_maze_latest.sh`, `scripts/viz_arc_latest.sh`
+
+Examples (all auto-create a timestamped GIF in `visualizations/`):
+```bash
+./scripts/viz_sudoku_latest.sh              # Auto-pick latest Sudoku checkpoint & dataset
+./scripts/viz_maze_latest.sh --max-steps 6  # Limit steps; still auto GIF
+./scripts/viz_arc_latest.sh --no-gif        # Disable GIF
+python scripts/visualize_maze_cli.py --checkpoint-dir <CKPT_DIR> --data-dir data/maze-30x30-hard-1k --sample-temp 0.8
+```
+
+GIF naming convention: `<domain>_viz_<timestamp>.gif` unless an explicit `--gif path.gif` is supplied. Use `--no-gif` to skip generation.
+
+Probability heatmaps: Enabled by default for all visualizers, showing per-cell probability that the current token matches the ground truth. Disable with `--no-prob-heatmap` (or legacy enable flag ignored) and customize the gradient via `--heatmap-gradient ' .:-=+*#%@'`.
+
+## Artifact Cleanup 🧹
+
+Remove old checkpoints and generated GIFs safely with a dry‑run by default:
+```bash
+./scripts/cleanup_artifacts.sh              # Dry run: checkpoints + gifs + empty dirs
+./scripts/cleanup_artifacts.sh --checkpoints --apply
+./scripts/cleanup_artifacts.sh --visuals --include-root-gif --apply
+PROTECT='*important*' ./scripts/cleanup_artifacts.sh --all --apply
+```
+Flags:
+* `--apply` actually delete (omit for dry run)
+* `--checkpoints`, `--visuals|--gifs`, `--prune-empty-dirs`, `--include-root-gif`, `--all`
+* `--protect=PAT1,PAT2` (or env `PROTECT=`) globs to preserve
+
+## Numerical Stability & Training Guards 🔐
+
+The training loop includes several defensive features:
+* Loss: default `softmax_cross_entropy` (former experimental `stablemax_cross_entropy` still available)
+* Optional gradient clipping via env: `HRM_CLIP_GRAD=<float>` (unset = no clip)
+* Q/K value clamp (attention) via env: `HRM_QK_CLAMP=<float>` (e.g., 30) to bound logits before softmax
+* Automatic NaN / Inf detection to skip and log anomalous batches
+* Warmup scheduling overrideable with `lr_warmup_steps=<int>`
+
+Set these as needed, e.g.:
+```bash
+HRM_CLIP_GRAD=1.0 HRM_QK_CLAMP=30 python pretrain.py data_path=... epochs=...
+```
 
 ## Full-scale Experiments 🔵
 

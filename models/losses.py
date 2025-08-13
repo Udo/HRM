@@ -22,13 +22,29 @@ def log_stablemax(x, dim=-1):
 
 
 def stablemax_cross_entropy(logits, labels, ignore_index: int = -100):
-    logprobs = log_stablemax(logits.to(torch.float64), dim=-1)
+    """Stablemax cross entropy with extra safety clamps.
+
+    Adds clamps to avoid -inf / NaN propagation if extremely unbalanced values
+    appear (observed on some MPS runs). Returns per-token loss (no reduction).
+    """
+    x = logits.to(torch.float32)
+    # Compute s(x) piecewise (already numerically mild) then normalize with clamps
+    s_x = torch.where(x < 0, 1.0 / (1 - x + 1e-30), x + 1.0)
+    sum_s = s_x.sum(dim=-1, keepdim=True)
+    # Clamp denominators & probabilities to avoid division by 0 and log(0)
+    probs = s_x / torch.clamp(sum_s, min=1e-30)
+    probs = torch.clamp(probs, min=1e-30, max=1.0)
+    logprobs = torch.log(probs)
 
     valid_mask = labels != ignore_index
     transformed_labels = torch.where(valid_mask, labels, 0)
     prediction_logprobs = torch.gather(logprobs, index=transformed_labels.to(torch.long).unsqueeze(-1), dim=-1).squeeze(-1)
 
-    return -torch.where(valid_mask, prediction_logprobs, 0)
+    loss = -torch.where(valid_mask, prediction_logprobs, torch.zeros_like(prediction_logprobs))
+    # Replace any inf/NaN that might slip through with finite large value to keep training alive
+    if torch.isnan(loss).any() or torch.isinf(loss).any():
+        loss = torch.where(torch.isfinite(loss), loss, torch.full_like(loss, 50.0))
+    return loss
 
 
 def softmax_cross_entropy(logits, labels, ignore_index: int = -100):

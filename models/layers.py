@@ -3,12 +3,50 @@ from typing import Tuple
 import torch
 from torch import nn
 import torch.nn.functional as F
+import os
 
-try:
-    from flash_attn_interface import flash_attn_func  # type: ignore[import]
-except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+# ---------------------------------------------------------------------------
+# FlashAttention import with graceful fallback to PyTorch SDPA (or manual)
+# This enables running on platforms (e.g. macOS / MPS / CPU) where flash-attn
+# wheels / extensions are not available. The repo originally assumes CUDA.
+# ---------------------------------------------------------------------------
+flash_attn_func = None  # type: ignore
+try:  # FlashAttention 3 custom interface
+    from flash_attn_interface import flash_attn_func as _fa_func  # type: ignore[import]
+    flash_attn_func = _fa_func  # type: ignore
+except Exception:  # noqa: BLE001
+    try:  # FlashAttention 2
+        from flash_attn import flash_attn_func as _fa_func  # type: ignore[import]
+        flash_attn_func = _fa_func  # type: ignore
+    except Exception:  # noqa: BLE001
+        pass
+
+if flash_attn_func is None:
+    def flash_attn_func(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = False):  # type: ignore
+        """Fallback attention using PyTorch scaled_dot_product_attention.
+
+        Expects q,k,v in shape [B, S, H, D] (as produced in this repo) and returns
+        tensor shaped [B, H, S, D] to match FlashAttention's output expectation
+        in the original code path.
+        """
+        # Convert to [B, H, S, D]
+        q_t = q.permute(0, 2, 1, 3)
+        k_t = k.permute(0, 2, 1, 3)
+        v_t = v.permute(0, 2, 1, 3)
+        # Use SDPA if available (2.0+) else manual attention
+        try:
+            out = F.scaled_dot_product_attention(q_t, k_t, v_t, is_causal=causal)
+        except Exception:  # noqa: BLE001
+            d = q_t.shape[-1]
+            attn = (q_t @ k_t.transpose(-2, -1)) / (d ** 0.5)
+            if causal:
+                S = attn.shape[-1]
+                causal_mask = torch.triu(torch.ones(S, S, device=attn.device, dtype=torch.bool), diagonal=1)
+                attn.masked_fill_(causal_mask, float('-inf'))
+            attn = attn.softmax(dim=-1)
+            out = attn @ v_t
+        # Return in shape [B, seq_len, H, D] contiguous to match downstream view logic
+        return out.permute(0, 2, 1, 3).contiguous()
 
 from models.common import trunc_normal_init_
 
@@ -114,6 +152,16 @@ class Attention(nn.Module):
 
         # hidden_states: [bs, seq_len, num_heads, head_dim]
         qkv = self.qkv_proj(hidden_states)
+
+        # Optional clamp (prevents extremely large magnitudes causing NaNs in rotary/attention)
+        clamp_val_env = os.environ.get("HRM_QK_CLAMP")
+        if clamp_val_env:
+            try:
+                clamp_v = float(clamp_val_env)
+            except ValueError:
+                clamp_v = 0.0
+            if clamp_v > 0:
+                qkv = torch.clamp(qkv, -clamp_v, clamp_v)
 
         # Split head
         qkv = qkv.view(batch_size, seq_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim)
