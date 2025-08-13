@@ -162,5 +162,3 @@ print('Wrote',root)
 ```
 Run training afterward pointing `data_path` to `data/mydomain-demo`.
 
----
-Keep this doc tight; for deeper rationale on grouping/augmentation examine existing domain builders (`dataset/build_*_dataset.py`).
