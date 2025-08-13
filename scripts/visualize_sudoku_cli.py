@@ -25,7 +25,6 @@ same directory) and a built Sudoku dataset.
 """
 from __future__ import annotations
 import argparse
-import glob
 import os
 import sys
 import time
@@ -35,6 +34,17 @@ from typing import Optional, List
 
 import numpy as np
 import torch
+from viz_common import (
+    pick_latest_checkpoint,
+    load_all_config,
+    load_dataset_metadata,
+    compute_prob_correct,
+    prob_grid_to_ascii,
+    append_text_frame,
+    save_gif,
+    derive_auto_gif_path,
+    DEFAULT_GRADIENT,
+)
 
 # Local imports
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # repo root
@@ -49,28 +59,8 @@ COLOR_CYAN = "\x1b[36m"
 COLOR_DIM = "\x1b[2m"
 
 
-def pick_latest_checkpoint(dir_path: str) -> Optional[str]:
-    cand = sorted(glob.glob(os.path.join(dir_path, 'model_step_*.pt')))
-    return cand[-1] if cand else None
-
-
-def load_config(checkpoint_dir: str) -> PretrainConfig:
-    cfg_path = os.path.join(checkpoint_dir, 'all_config.yaml')
-    if not os.path.isfile(cfg_path):
-        raise FileNotFoundError(f"Config file not found: {cfg_path}")
-    with open(cfg_path, 'r') as f:
-        raw = yaml.safe_load(f)
-    # Backwards compatibility: ensure required keys present
-    return PretrainConfig(**raw)
-
-
-def load_metadata(data_dir: str) -> PuzzleDatasetMetadata:
-    meta_path = os.path.join(data_dir, 'test', 'dataset.json')
-    if not os.path.isfile(meta_path):
-        raise FileNotFoundError(f"Dataset metadata not found: {meta_path}. Did you build the Sudoku dataset?")
-    with open(meta_path, 'r') as f:
-        md = yaml.safe_load(f)
-    return PuzzleDatasetMetadata(**md)
+load_config = load_all_config  # alias for clarity
+load_metadata = load_dataset_metadata
 
 
 def decode_tokens(tokens: torch.Tensor) -> str:
@@ -149,12 +139,7 @@ def main():
     np.random.seed(args.seed)
 
     # Derive default GIF path if not provided and not disabled
-    if args.gif is None and not args.no_gif:
-        import datetime
-        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        args.gif = f"sudoku_viz_{ts}.gif"
-        if args.auto is None:
-            args.auto = args.gif_delay  # ensure progress for GIF frames
+    derive_auto_gif_path('sudoku_viz', args, delay_attr='gif_delay', auto_attr='auto')
 
     if args.checkpoint_file:
         ckpt_file = args.checkpoint_file
@@ -168,8 +153,8 @@ def main():
     print(f"[INFO] Using checkpoint: {ckpt_file}")
 
     # Load config & metadata
-    config = load_config(ckpt_dir)
-    metadata = load_metadata(args.data_dir)
+    config = load_config(ckpt_dir, PretrainConfig)
+    metadata = load_metadata(args.data_dir, PuzzleDatasetMetadata)
     # Abort if seq len not 81 for Sudoku
     if metadata.seq_len != 81:
         print(f"[ABORT] Dataset seq_len={metadata.seq_len} not 81 (Sudoku). Use correct dataset.", file=sys.stderr)
@@ -232,10 +217,11 @@ def main():
             logits = outputs['logits']  # (B, Seq, V)
             pred = torch.argmax(logits, dim=-1)[0]
             if args.prob_heatmap:
-                probs = torch.softmax(logits[0], dim=-1)
-                gt = flat_solution
-                prob_correct = probs[torch.arange(probs.shape[0]), gt]
-                grid_prob = prob_correct.view(9,9).cpu().numpy()
+                prob_correct = compute_prob_correct(logits, flat_solution)
+                try:
+                    grid_prob = prob_correct.view(9,9).cpu().numpy()
+                except Exception:
+                    grid_prob = None
             else:
                 grid_prob = None
 
@@ -253,57 +239,16 @@ def main():
         print(f"\n[Step {step}/{max_steps}] correct={correct_cells}/{total_cells} ({frac*100:.1f}%) +new={newly_correct} changed={changed_cells} q_halt_logit={outputs['q_halt_logits'][0].item():.2f} q_continue_logit={outputs['q_continue_logits'][0].item():.2f}")
         print(board_str)
         if args.prob_heatmap and grid_prob is not None:
-            grad = args.heatmap_gradient or ' .:-=+*#%@'
-            L = len(grad)-1 if len(grad)>1 else 1
-            lines=[]
-            for r in range(9):
-                row=[]
-                for c in range(9):
-                    p = float(grid_prob[r][c]); p=max(0.0,min(1.0,p))
-                    idx=int(round(p*L))
-                    row.append(grad[idx])
-                lines.append(''.join(row))
-            print('[ProbHeatmap]\n'+'\n'.join(lines))
+            print(prob_grid_to_ascii(grid_prob, args.heatmap_gradient or DEFAULT_GRADIENT))
 
         if args.gif:
-            try:
-                from PIL import Image, ImageDraw, ImageFont
-                # Render text to image (monospace assumption)
-                # Attempt to load a default monospace font; fallback to default.
-                try:
-                    font = ImageFont.load_default()
-                except Exception:  # noqa: BLE001
-                    font = None  # type: ignore
-
-                lines = [f"Step {step}/{max_steps}", f"Correct: {correct_cells}/{total_cells} ({frac*100:.1f}%)", board_str]
-                if args.prob_heatmap and grid_prob is not None:
-                    grad = args.heatmap_gradient or ' .:-=+*#%@'
-                    L = len(grad)-1 if len(grad)>1 else 1
-                    heat_lines=[]
-                    for r in range(9):
-                        row=[]
-                        for c in range(9):
-                            p=float(grid_prob[r][c]); p=max(0.0,min(1.0,p)); idx=int(round(p*L)); row.append(grad[idx])
-                        heat_lines.append(''.join(row))
-                    lines.append('[ProbHeatmap]')
-                    lines.extend(heat_lines)
-                text = "\n".join(lines)
-                # Measure
-                dummy = Image.new('RGB', (10,10), 'white')
-                draw = ImageDraw.Draw(dummy)
-                w = max(draw.textlength(l, font=font) for l in text.split('\n')) + 10
-                h = (font.getbbox('Hg')[3]-font.getbbox('Hg')[1] if font else 10) * (len(lines)+1) + 10
-                img = Image.new('RGB', (int(w), int(h)), 'white')
-                draw = ImageDraw.Draw(img)
-                # Strip ANSI codes for GIF text
-                import re
-                ansi_re = re.compile(r'\x1b\[[0-9;]*m')
-                clean_text = ansi_re.sub('', text)
-                draw.multiline_text((5,5), clean_text, fill=(0,0,0), font=font, spacing=2)
-                frames.append(img)
-            except Exception as e:  # noqa: BLE001
-                if len(frames) == 0:
-                    print(f"[WARN] GIF frame rendering failed: {e}")
+            heat_block = ''
+            if args.prob_heatmap and grid_prob is not None:
+                heat_block = '\n' + prob_grid_to_ascii(grid_prob, args.heatmap_gradient or DEFAULT_GRADIENT)
+            text = (f"Step {step}/{max_steps}\nCorrect: {correct_cells}/{total_cells} ({frac*100:.1f}%)\n" +
+                    board_str + heat_block)
+            if not append_text_frame(frames, text) and not frames:
+                print("[WARN] GIF frame rendering failed (PIL not available)")
 
         prev_pred = pred.clone()
 
@@ -328,13 +273,10 @@ def main():
 
     # Write GIF if requested
     if args.gif and frames:
-        try:
-            duration_ms = max(50, int(args.gif_delay * 1000))
-            first, *rest = frames
-            first.save(args.gif, save_all=True, append_images=rest, duration=duration_ms, loop=0, optimize=False)
+        if save_gif(args.gif, frames, args.gif_delay):
             print(f"[INFO] Wrote GIF to {args.gif} ({len(frames)} frames)")
-        except Exception as e:  # noqa: BLE001
-            print(f"[WARN] Failed to save GIF: {e}")
+        else:
+            print("[WARN] Failed to save GIF (PIL missing or error)")
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@ from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import subprocess
 import json
 import hashlib
 import numpy as np
@@ -186,8 +187,53 @@ def convert_dataset(config: DataProcessConfig):
     
     # Read dataset
     data = {}
+    usable_sources = 0
     for dataset_dir in config.dataset_dirs:
-        load_puzzles_arcagi(data, dataset_dir, config)
+        if not os.path.isdir(dataset_dir):
+            print(f"[WARN] ARC source dir missing: {dataset_dir}")
+            continue
+        # Quick probe for at least one json 2 levels deep
+        has_json = False
+        for root, _dirs, files in os.walk(dataset_dir):
+            if any(f.endswith('.json') for f in files):
+                has_json = True
+                break
+        if not has_json:
+            print(f"[WARN] ARC source dir has no JSON files (skipping): {dataset_dir}")
+            continue
+        try:
+            load_puzzles_arcagi(data, dataset_dir, config)
+            usable_sources += 1
+        except FileNotFoundError as e:
+            print(f"[WARN] Failed scanning '{dataset_dir}': {e}; skipping")
+            continue
+
+    if usable_sources == 0:
+        # Attempt auto-fetch only once (guard with sentinel)
+        if os.environ.get("AUTO_FETCH_ARC") == "1" and os.environ.get("_ARC_FETCH_ATTEMPTED") != "1":
+            os.environ["_ARC_FETCH_ATTEMPTED"] = "1"
+            fetch_script = os.path.join(Path(__file__).resolve().parent.parent, "scripts", "fetch_arc_raw.sh")
+            if os.path.isfile(fetch_script):
+                print("[INFO] AUTO_FETCH_ARC=1 set; attempting to fetch ARC raw data via fetch_arc_raw.sh")
+                try:
+                    subprocess.run(["bash", fetch_script], check=True)
+                except Exception as e:
+                    print(f"[WARN] fetch_arc_raw.sh failed: {e}")
+                # Re-run scan once after fetch (will hit sentinel if still empty and raise)
+                return convert_dataset(config)
+            else:
+                print(f"[WARN] AUTO_FETCH_ARC=1 but fetch script not found: {fetch_script}")
+        raise SystemExit(
+            "\n[ERROR] No usable ARC raw-data sources found.\n"
+            "Expected JSON task files under paths like: dataset/raw-data/ARC-AGI/data or ConceptARC/corpus.\n"
+            "Current configured dataset_dirs: " + ", ".join(config.dataset_dirs) + "\n\n"
+            "Resolution options:\n"
+            "  1. Populate the raw directories with official ARC JSONs (respect licensing).\n"
+            "  2. Override --dataset-dirs to point at your local ARC data folders.\n"
+            "  3. Set AUTO_FETCH_ARC=1 (runs scripts/fetch_arc_raw.sh once if present).\n"
+            "  4. Use scripts/run_arc_pipeline.sh (auto tiny synthetic fallback with ALLOW_TINY_ARC=1).\n"
+            "  5. For a smoke test only: python dataset/build_arc_tiny_smoke.py --output-dir " + config.output_dir + "\n"
+        )
     
     # Map global puzzle identifiers
     num_identifiers = 1  # 0 is blank

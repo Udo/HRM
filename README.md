@@ -149,6 +149,68 @@ GIF naming convention: `<domain>_viz_<timestamp>.gif` unless an explicit `--gif 
 
 Probability heatmaps: Enabled by default for all visualizers, showing per-cell probability that the current token matches the ground truth. Disable with `--no-prob-heatmap` (or legacy enable flag ignored) and customize the gradient via `--heatmap-gradient ' .:-=+*#%@'`.
 
+## Dataset Overviews (Concise)
+
+### Sudoku Dataset
+Purpose: Learn to map a partially filled 9x9 Sudoku grid (with blanks) to its solved grid.
+
+Disk layout (example: `data/sudoku-extreme-1k-aug-1000/`):
+```
+train/  all__inputs.npy  all__labels.npy  all__puzzle_indices.npy  all__group_indices.npy  all__puzzle_identifiers.npy  dataset.json
+test/   (same fields)
+identifiers.json
+```
+Encoding:
+- Sequence length 81 (row‑major flatten).
+- Vocabulary size 11: 0=PAD, 1..10 represent digits 0..9 (inputs use '.' -> 0 which becomes 1 after +1 shift).
+- Inputs: unsolved puzzle digits (0 for blank) +1 shift; Labels: solved digits +1 shift; both shaped (N,81).
+- puzzle_identifiers: all zeros (no distinct embedding per puzzle by default).
+- group_indices / puzzle_indices: delimit single-example groups enabling uniform sampling logic.
+Augmentation (train only): random valid digit permutation, band/stack shuffles, row/col permutations, optional transpose; preserves Sudoku validity while diversifying surface form.
+Loss: token-level cross entropy ignoring pad_id (0). Exact accuracy counts full correct boards.
+Positional info: implicit by index; model optionally applies rotary or learned positional embeddings.
+
+### ARC Dataset (ARC-1 / ConceptARC | optionally ARC-2)
+Purpose: General abstraction & reasoning; map an input grid to an output grid under latent transformation rules (color, shape, spatial operations).
+
+Disk layout (example: `data/arc-aug-1000/`):
+```
+train/  all__inputs.npy  all__labels.npy  all__puzzle_indices.npy  all__group_indices.npy  all__puzzle_identifiers.npy  dataset.json
+test/   ...
+identifiers.json  (index -> original puzzle id or <blank>)
+```
+Encoding & padding:
+- Variable original grids (≤30x30) padded into a fixed 30x30 canvas (seq_len=900) then flattened.
+- Token vocabulary size 12: 0=PAD, 1=EOS boundary marker, 2..11=original colors 0..9 (shifted by +2).
+- For each example pair, both input and output grids are translationally padded with optional random top-left offset (train) to encourage translation invariance. EOS tokens (1) written along immediate right and bottom borders (L-shaped frame) of the content region.
+Identifiers: puzzle_identifiers assigns a unique integer per original puzzle (0 reserved) enabling optional puzzle embedding learning.
+Grouping: A “group” = one original puzzle plus its color/dihedral augmentations (up to `num_aug+1` variants). group_indices & puzzle_indices delimit examples for balanced sampling.
+Augmentations:
+- Color permutation (excluding background 0) + random dihedral (8 symmetries) with duplicate filtering via SHA256 hash.
+- Optional translational shift (train) with EOS boundary insertion.
+Loss: token cross entropy over non-pad positions; EOS tokens treated as normal class (not ignored) reinforcing shape boundary learning.
+Positional info: index encodes (row,col) after flatten; rotary positional embeddings cover full 30x30 grid length.
+Reasoning challenge: must infer transformation rule from few train/test sub-examples (grouped) – model leverages hierarchical cycles + puzzle embeddings for adaptation.
+
+### Maze Dataset
+Purpose: Grid path‑finding / transformation: map a maze layout (walls, start, goal, empty) to a target grid (often the solved path overlay). Supports assessing spatial planning under fixed sequence length.
+
+Disk layout (example: `data/maze-30x30-hard-1k/` mirrors other domains):
+```
+train/  all__inputs.npy  all__labels.npy  all__puzzle_indices.npy  all__group_indices.npy  all__puzzle_identifiers.npy  dataset.json
+test/   (same fields)
+identifiers.json
+```
+Encoding:
+- Typical grid 30x30 flattened (seq_len=900). Smaller mazes padded if mixed sizes (current release fixed size).
+- Vocabulary: 0=PAD, 1..K semantic cell tokens (wall, empty, start, goal, path, etc. – see builder for exact mapping). Position is implicit by index.
+- labels: either reconstruction or path-annotated target tokens; ignored / pad cells (id 0) excluded from loss.
+Augmentation (optional): dihedral (8 rotations/reflections) and (configurable) color/channel permutations preserving solvability.
+Grouping: group_indices / puzzle_indices use same convention as other domains (supporting uniform sampling despite future multi-example puzzles).
+Metrics: accuracy (token), exact_accuracy (entire grid), steps (mean ACT halting steps).
+Reasoning: model must propagate path constraints globally; hierarchical cycles allow iterative refinement of partial route hypotheses before full path emerges.
+
+
 ## Artifact Cleanup 🧹
 
 Remove old checkpoints and generated GIFs safely with a dry‑run by default:

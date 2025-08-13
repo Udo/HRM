@@ -11,23 +11,25 @@ import os
 # wheels / extensions are not available. The repo originally assumes CUDA.
 # ---------------------------------------------------------------------------
 flash_attn_func = None  # type: ignore
+ATTN_BACKEND = "unknown"
 try:  # FlashAttention 3 custom interface
     from flash_attn_interface import flash_attn_func as _fa_func  # type: ignore[import]
     flash_attn_func = _fa_func  # type: ignore
+    ATTN_BACKEND = "flash-attn-3"
 except Exception:  # noqa: BLE001
     try:  # FlashAttention 2
         from flash_attn import flash_attn_func as _fa_func  # type: ignore[import]
         flash_attn_func = _fa_func  # type: ignore
+        ATTN_BACKEND = "flash-attn-2"
     except Exception:  # noqa: BLE001
         pass
 
 if flash_attn_func is None:
     def flash_attn_func(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = False):  # type: ignore
-        """Fallback attention using PyTorch scaled_dot_product_attention.
+        """Fallback attention using PyTorch scaled_dot_product_attention (SDPA) or manual implementation.
 
         Expects q,k,v in shape [B, S, H, D] (as produced in this repo) and returns
-        tensor shaped [B, H, S, D] to match FlashAttention's output expectation
-        in the original code path.
+        tensor shaped [B, H, S, D] to match FlashAttention's output expectation.
         """
         # Convert to [B, H, S, D]
         q_t = q.permute(0, 2, 1, 3)
@@ -36,6 +38,7 @@ if flash_attn_func is None:
         # Use SDPA if available (2.0+) else manual attention
         try:
             out = F.scaled_dot_product_attention(q_t, k_t, v_t, is_causal=causal)
+            backend = "torch-sdpa"
         except Exception:  # noqa: BLE001
             d = q_t.shape[-1]
             attn = (q_t @ k_t.transpose(-2, -1)) / (d ** 0.5)
@@ -45,8 +48,23 @@ if flash_attn_func is None:
                 attn.masked_fill_(causal_mask, float('-inf'))
             attn = attn.softmax(dim=-1)
             out = attn @ v_t
+            backend = "manual-eager"
+        global ATTN_BACKEND
+        if ATTN_BACKEND == "unknown":
+            ATTN_BACKEND = backend
         # Return in shape [B, seq_len, H, D] contiguous to match downstream view logic
         return out.permute(0, 2, 1, 3).contiguous()
+    if ATTN_BACKEND == "unknown":
+        ATTN_BACKEND = "torch-sdpa-or-manual"
+
+# Optional runtime logging (set HRM_LOG_BACKENDS=1)
+if os.environ.get("HRM_LOG_BACKENDS"):
+    try:
+        rank = int(os.environ.get("RANK", "0"))
+    except ValueError:
+        rank = 0
+    if rank == 0:
+        print(f"[HRM] Attention backend: {ATTN_BACKEND}")
 
 from models.common import trunc_normal_init_
 

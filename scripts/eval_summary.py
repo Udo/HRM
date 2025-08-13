@@ -28,20 +28,12 @@ import numpy as np  # type: ignore
 # Import training/eval utilities
 from pretrain import PretrainConfig, init_train_state, create_dataloader, evaluate, DEFAULT_DEVICE  # type: ignore
 from evaluate import EvalConfig  # type: ignore
+from viz_common import find_latest_checkpoint_recursive
 
 
-def find_latest_checkpoint() -> Path | None:
-    base = Path('checkpoints')
-    if not base.exists():
-        return None
-    # Prefer new naming
-    candidates = list(base.rglob('model_step_*.pt'))
-    if not candidates:
-        candidates = list(base.rglob('step_*'))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
+def find_latest_checkpoint() -> Path | None:  # thin shim for backward compat
+    path = find_latest_checkpoint_recursive()
+    return Path(path) if path else None
 
 
 def load_config_for_checkpoint(ckpt: Path) -> PretrainConfig:

@@ -17,6 +17,17 @@ import argparse, os, sys, glob, yaml, time, math, re, datetime
 from typing import Optional, List
 import numpy as np
 import torch
+from viz_common import (
+    pick_latest_checkpoint as pick_ckpt,
+    load_all_config,
+    load_dataset_metadata,
+    compute_prob_correct,
+    prob_grid_to_ascii,
+    append_text_frame,
+    save_gif,
+    derive_auto_gif_path,
+    DEFAULT_GRADIENT,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from pretrain import PretrainConfig, create_model  # type: ignore
@@ -25,17 +36,8 @@ from models.hrm.hrm_act_v1 import HierarchicalReasoningModel_ACTV1  # type: igno
 
 RESET="\x1b[0m"; GREEN="\x1b[32m"; CYAN="\x1b[36m"; DIM="\x1b[2m"
 
-def pick_ckpt(d: str) -> Optional[str]:
-    c = sorted(glob.glob(os.path.join(d, 'model_step_*.pt')))
-    return c[-1] if c else None
-
-def load_config(d: str) -> PretrainConfig:
-    with open(os.path.join(d, 'all_config.yaml')) as f:
-        return PretrainConfig(**yaml.safe_load(f))
-
-def load_meta(data_dir: str) -> PuzzleDatasetMetadata:
-    with open(os.path.join(data_dir, 'test', 'dataset.json')) as f:
-        return PuzzleDatasetMetadata(**yaml.safe_load(f))
+load_config = load_all_config
+load_meta = load_dataset_metadata
 
 def render(prev: Optional[torch.Tensor], curr: torch.Tensor, sol: torch.Tensor, no_color: bool) -> str:
     """Render a colorized ARC grid.
@@ -90,11 +92,7 @@ def main():
     ap.set_defaults(prob_heatmap=True)
     args = ap.parse_args()
 
-    if args.gif is None and not args.no_gif:
-        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        args.gif = f"arc_viz_{ts}.gif"
-        if args.auto is None:
-            args.auto = args.gif_delay
+    derive_auto_gif_path('arc_viz', args, delay_attr='gif_delay', auto_attr='auto')
 
     if args.checkpoint_file:
         ckpt_file = args.checkpoint_file; ckpt_dir = os.path.dirname(ckpt_file)
@@ -104,8 +102,8 @@ def main():
             print('[ERROR] No checkpoint files found in checkpoint-dir', file=sys.stderr)
             sys.exit(1)
 
-    cfg = load_config(ckpt_dir)
-    meta = load_meta(args.data_dir)
+    cfg = load_config(ckpt_dir, PretrainConfig)
+    meta = load_meta(args.data_dir, PuzzleDatasetMetadata)
     # Domain sanity check: ARC expects seq_len multiple of 900 (30x30); abort if mismatch
     if meta.seq_len != 900:
         print(f"[ABORT] Dataset seq_len={meta.seq_len} not 900 (ARC). Use correct dataset.", file=sys.stderr)
@@ -142,26 +140,10 @@ def main():
 
     # Frame 0: initial input vs solution diff
     if args.gif:
-        try:
-            from PIL import Image, ImageDraw, ImageFont
-            font = ImageFont.load_default()
-            init_tokens = inp[0]
-            init_grid = render(None, init_tokens.cpu(), flat_solution, args.no_color)
-            header = f"Initial (index={idx})"
-            text = header + "\n" + init_grid
-            clean = ansi_re.sub('', text)
-            lines = clean.split('\n')
-            dummy = Image.new('RGB', (10,10), 'white'); draw = ImageDraw.Draw(dummy)
-            lh = (font.getbbox('Hg')[3]-font.getbbox('Hg')[1]) if hasattr(font,'getbbox') else 10
-            w = max(draw.textlength(l, font=font) for l in lines)+8
-            h = lh*len(lines)+8
-            img = Image.new('RGB',(int(w),int(h)),'white'); draw = ImageDraw.Draw(img)
-            y=4
-            for l in lines:
-                draw.text((4,y),l,fill=(0,0,0),font=font); y+=lh
-            frames.append(img)
-        except Exception:
-            pass
+        init_tokens = inp[0]
+        init_grid = render(None, init_tokens.cpu(), flat_solution, args.no_color)
+        header = f"Initial (index={idx})\n" + init_grid
+        append_text_frame(frames, header)
 
     for step in range(1, max_steps+1):
         with torch.inference_mode():
@@ -169,11 +151,12 @@ def main():
             logits = outputs['logits']
             pred = torch.argmax(logits, dim=-1)[0].cpu()
             if args.prob_heatmap:
-                probs = torch.softmax(logits[0], dim=-1)
-                gt = flat_solution
-                prob_correct = probs[torch.arange(probs.shape[0]), gt]
-                side = int(math.sqrt(prob_correct.shape[0]))
-                grid_prob = prob_correct.view(side, side).cpu().numpy()
+                prob_correct = compute_prob_correct(logits, flat_solution)
+                try:
+                    side = int(math.sqrt(prob_correct.shape[0]))
+                    grid_prob = prob_correct.view(side, side).cpu().numpy()
+                except Exception:
+                    grid_prob = None
             else:
                 grid_prob = None
         correct = (pred == flat_solution).sum().item()
@@ -185,52 +168,14 @@ def main():
         print(f"\n[Step {step}/{max_steps}] correct={correct}/{total} ({pct:.1f}%) +new={newly_correct} changed={changed} halt_q={halt_q:.2f}")
         print(grid_str)
         if args.prob_heatmap and grid_prob is not None:
-            grad = args.heatmap_gradient or ' .:-=+*#%@'
-            L = len(grad)-1 if len(grad)>1 else 1
-            lines=[]
-            side = grid_prob.shape[0]
-            for r in range(side):
-                row=[]
-                for c in range(side):
-                    p=float(grid_prob[r][c]); p=max(0.0,min(1.0,p)); idx=int(round(p*L)); row.append(grad[idx])
-                lines.append(''.join(row))
-            print('[ProbHeatmap]\n'+'\n'.join(lines))
+            print(prob_grid_to_ascii(grid_prob, args.heatmap_gradient or DEFAULT_GRADIENT))
         if args.gif:
-            try:
-                from PIL import Image, ImageDraw, ImageFont
-                stats_line = f"Step {step}/{max_steps}  correct={correct}/{total} ({pct:.1f}%) +new={newly_correct} Δ={changed}"
-                if args.prob_heatmap and grid_prob is not None:
-                    grad = args.heatmap_gradient or ' .:-=+*#%@'
-                    L = len(grad)-1 if len(grad)>1 else 1
-                    heat_lines=[]
-                    side = grid_prob.shape[0]
-                    for r in range(side):
-                        row=[]
-                        for c in range(side):
-                            p=float(grid_prob[r][c]); p=max(0.0,min(1.0,p)); idx=int(round(p*L)); row.append(grad[idx])
-                        heat_lines.append(''.join(row))
-                    heat_block='[ProbHeatmap]\n'+'\n'.join(heat_lines)
-                    text = stats_line + "\n" + grid_str + "\n" + heat_block
-                else:
-                    text = stats_line + "\n" + grid_str
-                clean_text = ansi_re.sub('', text)
-                font = ImageFont.load_default()
-                lines = clean_text.split('\n')
-                dummy = Image.new('RGB', (10,10), 'white')
-                draw = ImageDraw.Draw(dummy)
-                line_height = (font.getbbox('Hg')[3]-font.getbbox('Hg')[1]) if hasattr(font, 'getbbox') else 10
-                width = max(draw.textlength(l, font=font) for l in lines) + 8
-                height = line_height * len(lines) + 8
-                img = Image.new('RGB', (int(width), int(height)), 'white')
-                draw = ImageDraw.Draw(img)
-                y = 4
-                for l in lines:
-                    draw.text((4, y), l, fill=(0,0,0), font=font)
-                    y += line_height
-                frames.append(img)
-            except Exception as e:  # noqa: BLE001
-                if not frames:
-                    print(f"[WARN] Failed to render GIF frame: {e}")
+            stats_line = f"Step {step}/{max_steps}  correct={correct}/{total} ({pct:.1f}%) +new={newly_correct} Δ={changed}"
+            heat_block = ''
+            if args.prob_heatmap and grid_prob is not None:
+                heat_block = '\n' + prob_grid_to_ascii(grid_prob, args.heatmap_gradient or DEFAULT_GRADIENT)
+            if not append_text_frame(frames, stats_line + '\n' + grid_str + heat_block) and not frames:
+                print('[WARN] GIF frame rendering failed (PIL not available)')
         prev_pred = pred.clone()
         if correct == total:
             print('[COMPLETE]'); break
@@ -242,14 +187,10 @@ def main():
 
     # Save GIF
     if args.gif and frames:
-        try:
-            from PIL import Image  # noqa: F401
-            dur_ms = max(50, int(args.gif_delay * 1000))
-            first, *rest = frames
-            first.save(args.gif, save_all=True, append_images=rest, duration=dur_ms, loop=0, optimize=False)
+        if save_gif(args.gif, frames, args.gif_delay):
             print(f"[INFO] Wrote GIF to {args.gif} ({len(frames)} frames)")
-        except Exception as e:  # noqa: BLE001
-            print(f"[WARN] Failed to save GIF: {e}")
+        else:
+            print('[WARN] Failed to save GIF (PIL missing or error)')
 
 if __name__ == '__main__':
     main()

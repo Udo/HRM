@@ -19,6 +19,17 @@ import argparse, os, sys, glob, yaml, time, math, datetime, re
 from typing import Optional, List
 import numpy as np
 import torch
+from viz_common import (
+    pick_latest_checkpoint as pick_ckpt,
+    load_all_config,
+    load_dataset_metadata,
+    compute_prob_correct,
+    prob_grid_to_ascii,
+    append_text_frame,
+    save_gif,
+    derive_auto_gif_path,
+    DEFAULT_GRADIENT,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from pretrain import PretrainConfig, create_model  # type: ignore
@@ -30,17 +41,8 @@ RESET="\x1b[0m"; GREEN="\x1b[32m"; CYAN="\x1b[36m"; DIM="\x1b[2m"; RED="\x1b[31m
 CHARSET = "# SGo"  # from build script
 ID2CH = ["?"] + list(CHARSET)  # 0 pad maps to ? (untrained model may predict 0)
 
-def pick_ckpt(d):
-    c=sorted(glob.glob(os.path.join(d,'model_step_*.pt')))
-    return c[-1] if c else None
-
-def load_config(d):
-    with open(os.path.join(d,'all_config.yaml')) as f:
-        return PretrainConfig(**yaml.safe_load(f))
-
-def load_meta(data_dir):
-    with open(os.path.join(data_dir,'test','dataset.json')) as f:
-        return PuzzleDatasetMetadata(**yaml.safe_load(f))
+load_config = load_all_config
+load_meta = load_dataset_metadata
 
 def render(prev, curr, sol, side, use_color=True, pad_char='.', basic=False):
     """Default diff rendering (token-level) used when not in overlay mode."""
@@ -144,21 +146,19 @@ def main():
     if args.sample_temp < 0:
         print('[ERROR] --sample-temp must be >=0', file=sys.stderr); sys.exit(2)
     # Auto GIF name
-    if args.gif is None and not args.no_gif:
-        ts=datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        args.gif=f"maze_viz_{ts}.gif"
-        if args.auto is None:
-            args.auto = args.gif_delay
+    derive_auto_gif_path('maze_viz', args, delay_attr='gif_delay', auto_attr='auto')
 
     if args.checkpoint_file:
-        ckpt=args.checkpoint_file; ckpt_dir=os.path.dirname(ckpt)
+        ckpt = args.checkpoint_file
+        ckpt_dir = os.path.dirname(ckpt)
     else:
-        ckpt_dir=args.checkpoint_dir; ckpt=pick_ckpt(ckpt_dir)
+        ckpt_dir = args.checkpoint_dir
+        ckpt = pick_ckpt(ckpt_dir)
         if ckpt is None:
             print('[ERROR] No checkpoint files found', file=sys.stderr)
             sys.exit(1)
-    cfg=load_config(ckpt_dir)
-    meta=load_meta(args.data_dir)
+    cfg=load_config(ckpt_dir, PretrainConfig)
+    meta=load_meta(args.data_dir, PuzzleDatasetMetadata)
     model,_o,_l=create_model(cfg, train_metadata=meta, world_size=1)
     state=torch.load(ckpt, map_location='cpu')
     model.load_state_dict(state, strict=True)
@@ -197,22 +197,8 @@ def main():
 
     # Initial frame (input)
     if args.gif:
-        try:
-            from PIL import Image, ImageDraw, ImageFont
-            font = ImageFont.load_default()
-            base = render(None, inp[0].cpu(), lab[0].cpu(), side, use_color=not args.no_color, pad_char=args.pad_char)
-            text = f"Initial (idx={idx})\n" + base
-            clean = ansi_re.sub('', text)
-            lines = clean.split('\n')
-            dummy = Image.new('RGB',(10,10),'white'); dr=ImageDraw.Draw(dummy)
-            lh=(font.getbbox('Hg')[3]-font.getbbox('Hg')[1]) if hasattr(font,'getbbox') else 10
-            w=max(dr.textlength(l,font=font) for l in lines)+8; h=lh*len(lines)+8
-            img=Image.new('RGB',(int(w),int(h)),'white'); dr=ImageDraw.Draw(img); y=4
-            for l in lines:
-                dr.text((4,y), l, fill=(0,0,0), font=font); y+=lh
-            frames.append(img)
-        except Exception:
-            pass
+        base = render(None, inp[0].cpu(), lab[0].cpu(), side, use_color=not args.no_color, pad_char=args.pad_char)
+        append_text_frame(frames, f"Initial (idx={idx})\n" + base)
 
     prev=None
     correct=-1; total=lab.shape[1]
@@ -223,9 +209,7 @@ def main():
             logits = out['logits']  # (B, Seq, V)
             step_pred = sample_from_logits(logits[0]).cpu()
             if args.prob_heatmap:
-                probs = torch.softmax(logits[0], dim=-1)
-                gt = lab[0]
-                prob_correct = probs[torch.arange(probs.shape[0]), gt]
+                prob_correct = compute_prob_correct(logits, lab[0])
                 try:
                     prob_grid = prob_correct.view(side, side).cpu().numpy()
                 except Exception:
@@ -263,50 +247,15 @@ def main():
         print(f"\n[Step {step}/{max_steps}] correct={correct}/{total} ({pct:.1f}%) +new={newly_correct} changed={changed} halt_q={out['q_halt_logits'][0].item():.2f}{extra}")
         print(board)
         if args.prob_heatmap and prob_grid is not None:
-            # Build ASCII heatmap
-            grad = args.heatmap_gradient or ' .:-=+*#%@'
-            L = len(grad) - 1 if len(grad) > 1 else 1
-            lines=[]
-            for r in range(side):
-                row=[]
-                for c in range(side):
-                    p = max(0.0, min(1.0, float(prob_grid[r][c])))
-                    idx = int(round(p * L))
-                    row.append(grad[idx])
-                lines.append(''.join(row))
-            print('[ProbHeatmap]\n' + '\n'.join(lines))
+            print(prob_grid_to_ascii(prob_grid, args.heatmap_gradient or DEFAULT_GRADIENT))
 
         if args.gif:
-            try:
-                from PIL import Image, ImageDraw, ImageFont
-                font = ImageFont.load_default()
-                stats = f"Step {step}/{max_steps}  acc={correct}/{total} ({pct:.1f}%) +new={newly_correct} Δ={changed}{extra}"
-                heat_block = ''
-                if args.prob_heatmap and prob_grid is not None:
-                    grad = args.heatmap_gradient or ' .:-=+*#%@'
-                    L = len(grad) - 1 if len(grad) > 1 else 1
-                    heat_lines=[]
-                    for r in range(side):
-                        row=[]
-                        for c in range(side):
-                            p = max(0.0, min(1.0, float(prob_grid[r][c])))
-                            idx = int(round(p * L))
-                            row.append(grad[idx])
-                        heat_lines.append(''.join(row))
-                    heat_block = '\n[ProbHeatmap]\n' + '\n'.join(heat_lines)
-                text = stats + "\n" + board + heat_block
-                clean = ansi_re.sub('', text)
-                lines = clean.split('\n')
-                dummy = Image.new('RGB', (10, 10), 'white'); dr = ImageDraw.Draw(dummy)
-                lh = (font.getbbox('Hg')[3] - font.getbbox('Hg')[1]) if hasattr(font, 'getbbox') else 10
-                w = max(dr.textlength(l, font=font) for l in lines) + 8; h = lh * len(lines) + 8
-                img = Image.new('RGB', (int(w), int(h)), 'white'); dr = ImageDraw.Draw(img); y = 4
-                for l in lines:
-                    dr.text((4, y), l, fill=(0, 0, 0), font=font); y += lh
-                frames.append(img)
-            except Exception as e:  # noqa: BLE001
-                if not frames:
-                    print(f"[WARN] GIF frame generation failed: {e}")
+            stats = f"Step {step}/{max_steps}  acc={correct}/{total} ({pct:.1f}%) +new={newly_correct} Δ={changed}{extra}"
+            heat_block = ''
+            if args.prob_heatmap and prob_grid is not None:
+                heat_block = '\n' + prob_grid_to_ascii(prob_grid, args.heatmap_gradient or DEFAULT_GRADIENT)
+            if not append_text_frame(frames, stats + '\n' + board + heat_block) and not frames:
+                print('[WARN] GIF frame generation failed (PIL not available)')
 
         prev = step_pred.clone()
         if correct == total:
@@ -320,14 +269,10 @@ def main():
 
     # Save GIF
     if args.gif and frames:
-        try:
-            from PIL import Image
-            dur = max(50, int(args.gif_delay*1000))
-            first,*rest = frames
-            first.save(args.gif, save_all=True, append_images=rest, duration=dur, loop=0, optimize=False)
+        if save_gif(args.gif, frames, args.gif_delay):
             print(f"[INFO] Wrote GIF to {args.gif} ({len(frames)} frames)")
-        except Exception as e:  # noqa: BLE001
-            print(f"[WARN] Failed to save GIF: {e}")
+        else:
+            print('[WARN] Failed to save GIF (PIL missing or error)')
 
 if __name__=='__main__':
     main()

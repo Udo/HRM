@@ -5,7 +5,6 @@
 # cache
 /cache/
 # data
-/data/
 /outputs/
 
 # Byte-compiled / optimized / DLL files
@@ -19,6 +18,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+data/
 develop-eggs/
 dist/
 downloads/

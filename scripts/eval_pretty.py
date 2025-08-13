@@ -28,6 +28,7 @@ import numpy as np  # type: ignore
 import torch  # type: ignore
 
 from pretrain import PretrainConfig, init_train_state, create_dataloader, evaluate, DEFAULT_DEVICE  # type: ignore
+from viz_common import find_latest_checkpoint_recursive
 
 BOX_HORIZONTAL = '─'
 BOX_VERTICAL = '│'
@@ -55,17 +56,9 @@ def c(text: str, color: str, enable: bool) -> str:
         return text
     return f"{COLORS[color]}{text}{COLOR_RESET}"
 
-def find_latest_checkpoint() -> Path | None:
-    base = Path('checkpoints')
-    if not base.exists():
-        return None
-    candidates = list(base.rglob('model_step_*.pt'))
-    if not candidates:
-        candidates = list(base.rglob('step_*'))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
+def find_latest_checkpoint() -> Path | None:  # shim
+    p = find_latest_checkpoint_recursive()
+    return Path(p) if p else None
 
 def load_config(ckpt: Path) -> PretrainConfig:
     cfg_file = ckpt.parent / 'all_config.yaml'

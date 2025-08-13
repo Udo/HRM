@@ -33,8 +33,15 @@ def convert_subset(set_name: str, config: DataProcessConfig):
     grid_size = None
     inputs = []
     labels = []
-    
-    with open(hf_hub_download(config.source_repo, f"{set_name}.csv", repo_type="dataset"), newline="") as csvfile:  # type: ignore
+    try:
+        csv_path = hf_hub_download(config.source_repo, f"{set_name}.csv", repo_type="dataset")
+    except Exception as e:
+        raise SystemExit(
+            f"[ERROR] Failed to download Maze '{set_name}.csv' from {config.source_repo}: {e}\n"
+            "Verify internet connectivity or provide a local mirror via --source-repo."
+        )
+
+    with open(csv_path, newline="") as csvfile:  # type: ignore
         reader = csv.reader(csvfile)
         next(reader)  # Skip header
         for source, q, a, rating in reader:

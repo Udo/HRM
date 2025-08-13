@@ -46,6 +46,8 @@ set -euo pipefail
 : "${CKPT_EVERY:=0}"
 : "${SUMMARY:=1}"
 : "${BENCHMARK:=1}"
+: "${WARMUP_STEPS:=0}"  # Tiny runs: disable or keep extremely small warmup
+: "${HALT_STEPS:=4}"    # Reduce from default 16 to speed eval/ACT loop for smoke tests
 
 # Backwards compat: absorb leading VAR=VAL args (uppercase env style)
 while [ $# -gt 0 ]; do
@@ -97,6 +99,13 @@ if [ "$CKPT_EVERY" = "1" ]; then
 fi
 
 echo "[INFO] Training tiny model epochs=$EPOCHS eval_interval=$EVAL_INTERVAL hidden=$HIDDEN heads=$HEADS" >&2
+DEFAULT_LOSS=softmax_cross_entropy
+if [ "${ALLOW_STABLEMAX:-0}" = "1" ]; then
+  DEFAULT_LOSS=stablemax_cross_entropy
+fi
+
+# Provide safer defaults for tiny smoke: force float32 forward + enable mild grad clip unless user overrode
+export HRM_CLIP_GRAD=${HRM_CLIP_GRAD:-1.0}
 OVERRIDES=(
   data_path="$OUTPUT_DIR"
   epochs="$EPOCHS"
@@ -108,11 +117,14 @@ OVERRIDES=(
   arch.L_layers="$L_LAYERS"
   arch.H_cycles="$H_CYC"
   arch.L_cycles="$L_CYC"
+  arch.halt_max_steps="$HALT_STEPS"
+  +arch.forward_dtype=float32
+  lr_warmup_steps="$WARMUP_STEPS"
   lr="$LR"
   puzzle_emb_lr="$PUZ_LR"
   weight_decay=0.0
   puzzle_emb_weight_decay=0.0
-  arch.loss.loss_type=stablemax_cross_entropy
+  arch.loss.loss_type=$DEFAULT_LOSS
 )
 
 _hrm_run_pretrain "${OVERRIDES[@]}" ${EXTRA_ARGS:+"${EXTRA_ARGS[@]}"} ${HYDRA_OVERRIDES:+"${HYDRA_OVERRIDES[@]}"}

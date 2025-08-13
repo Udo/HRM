@@ -61,8 +61,16 @@ def convert_subset(set_name: str, config: DataProcessConfig):
     # Read CSV
     inputs = []
     labels = []
-    
-    with open(hf_hub_download(config.source_repo, f"{set_name}.csv", repo_type="dataset"), newline="") as csvfile:
+    try:
+        csv_path = hf_hub_download(config.source_repo, f"{set_name}.csv", repo_type="dataset")
+    except Exception as e:
+        raise SystemExit(
+            f"[ERROR] Failed to download Sudoku '{set_name}.csv' from {config.source_repo}: {e}\n"
+            "Check internet connectivity or set HF_HOME / HF tokens if needed.\n"
+            "You can also pre-download the dataset and point --source-repo to a local directory containing train.csv/test.csv."
+        )
+
+    with open(csv_path, newline="") as csvfile:
         reader = csv.reader(csvfile)
         next(reader)  # Skip header
         for source, q, a, rating in reader:

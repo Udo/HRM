@@ -1,56 +1,49 @@
-# Maze Pipeline Scripts
+# Maze Scripts (Concise)
 
-This directory now includes maze dataset pipeline helpers.
+Lightweight wrappers for building, training, and visualizing Maze experiments. Common environment variable semantics, stability toggles, visualization behavior, and dataset field definitions live in the root `README.md` & `scripts/README.md`.
 
-## Files
-- `build_maze_1k.sh` – Wraps `dataset/build_maze_dataset.py` with optional subsample & dihedral augmentation.
-- `train_maze_small.sh` – Baseline training config (≈800 epochs, eval every 80).
-- `train_maze_tiny.sh` – Very small fast config for smoke tests / CI.
-- `run_maze_pipeline.sh` – End‑to‑end: (optionally) build dataset, train, eval summary, benchmark.
+Core helpers:
+* `build_maze_1k.sh` – Build canonical 1k maze dataset (optional subsample & dihedral aug).
+* `run_maze_pipeline.sh` – End‑to‑end build→train→eval/benchmark (skip build with `SKIP_BUILD=1`).
+* `train_maze_small.sh` – Baseline long run config (~800 epochs / eval 80).
+* `train_maze_tiny.sh` – Fast smoke / CI config.
+* `viz_maze_latest.sh` / `visualize_maze_cli.py` – Step visualization + GIF; supports stochastic sampling.
 
-## Usage Examples
-Build + train + eval (default full 1k set):
+Examples:
 ```
+# Default full 1k pipeline
 ./scripts/run_maze_pipeline.sh
-```
-Subsample 200 puzzles with augmentation and keep checkpoints every eval:
-```
+
+# Subsample with augmentation & save ckpt each eval
 SUBSAMPLE=200 AUG=1 CKPT_EVERY=1 ./scripts/run_maze_pipeline.sh
-```
-Skip rebuild if dataset already present:
-```
+
+# Skip rebuild
 SKIP_BUILD=1 ./scripts/run_maze_pipeline.sh
-```
-Override architecture (Hydra style) after `--`:
-```
+
+# Architecture overrides
 ./scripts/run_maze_pipeline.sh -- arch.hidden_size=384 arch.num_heads=12
-```
-Tiny smoke test training only:
-```
+
+# Tiny quick test
 ./scripts/train_maze_tiny.sh
 ```
 
-## Environment Variables Summary
-| Var | Purpose | Default |
-|-----|---------|---------|
-| DATASET_DIR | Output dataset directory | data/maze-30x30-hard-1k |
-| SUBSAMPLE | Limit training samples | (full) |
-| AUG | Apply dihedral augmentation | 0 |
-| SKIP_BUILD | Skip dataset build step | 0 |
-| EPOCHS | Total epochs | 800 |
-| EVAL_INTERVAL | Eval interval epochs | 80 |
-| GBS | Global batch size | 128 |
-| HIDDEN, HEADS, H/L_LAYERS, H/L_CYC | Architecture sizes | (see scripts) |
-| LR / PUZ_LR | Learning rates | 5e-4 |
-| WD / PUZ_WD | Weight decay | 0.1 |
-| CKPT_EVERY | Save ckpt each eval | 0 |
-| SUMMARY | Run eval_summary | 1 |
-| BENCHMARK | Run benchmark eval | 1 |
+Dataset encoding & augmentation details: refer to the Maze section in the root `README.md` (now consolidated). Script/global env variable tables: `scripts/README.md`.
 
-## Notes
-- Loss forced to `stablemax_cross_entropy` for numerical stability on maze.
-- `DISABLE_COMPILE=1` and sparse emb optimizer disabled by default for fast iteration on Apple Silicon.
-- Adjust `HRM_DISABLE_WANDB=0` to enable Weights & Biases if configured.
-- For interactive reasoning inspection & GIFs, see `visualize_maze_cli.py` or run `./scripts/viz_maze_latest.sh` (auto GIF). Use `--sample-temp` to introduce stochastic exploration.
-- To clean old maze GIFs & checkpoints: `./scripts/cleanup_artifacts.sh --visuals` (dry) then add `--apply`.
-- Probability heatmap (per-cell correctness) is on by default; disable with `--no-prob-heatmap`.
+Notes:
+* Default loss currently `stablemax_cross_entropy` for Maze (empirically stable); override with `arch.loss.loss_type=softmax_cross_entropy`.
+* Probability heatmap enabled by default; disable via `--no-prob-heatmap`.
+* Sampling: add `--sample-temp <float>` to explore diverse path hypotheses during visualization.
+* Cleanup old artifacts: `./scripts/cleanup_artifacts.sh --visuals` (dry run) then add `--apply`.
+
+Minimal mental model: Flattened grid tokens -> embedding (+optional puzzle id) -> hierarchical cycles refine -> logits per cell -> cross entropy vs target path/overlay tokens (pad ignored) with ACT controlling compute depth.
+
+## Dataset Snapshot
+```
+Layout: train/ & test/ with all__inputs.npy, all__labels.npy, all__puzzle_indices.npy, all__group_indices.npy, all__puzzle_identifiers.npy, dataset.json
+Seq len: 900 (30x30 flatten). Vocab: 0=PAD, 1..K semantic cells (wall, empty, start, goal, path...). Position implicit.
+Targets: path or reconstructed grid (pad ignored). Grouping indices retained for consistency with multi-example domains.
+Augment (optional): dihedral transforms (+ potential channel/color perm if enabled).
+Metrics: accuracy (token), exact_accuracy (entire grid), steps (mean ACT steps).
+```
+See Maze section in root README for extended explanation.
+
