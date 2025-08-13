@@ -6,6 +6,8 @@ Key helpers:
 * `build_arc_dataset.py` – Full dataset w/ color perm, dihedral, translation + EOS frame.
 * `build_arc_tiny_smoke.py` – Synthetic tiny ARC‑like random dataset (smoke tests, no structure).
 * `run_arc_pipeline.sh` – End‑to‑end build→train→eval/benchmark (falls back tiny when allowed).
+* `repro_arc_result.sh` – Single-run reproducible ARC training + JSON metrics summary (paper-style fields).
+* `repro_arc_multi_seed.sh` – Multi-seed orchestrator: runs multiple seeds and aggregates mean/std JSON.
 * `viz_arc_latest.sh` / `visualize_arc_cli.py` – Step reasoning + GIF (prob heatmap on).
 
 Examples:

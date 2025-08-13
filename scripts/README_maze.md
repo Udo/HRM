@@ -8,6 +8,8 @@ Core helpers:
 * `train_maze_small.sh` – Baseline long run config (~800 epochs / eval 80).
 * `train_maze_tiny.sh` – Fast smoke / CI config.
 * `viz_maze_latest.sh` / `visualize_maze_cli.py` – Step visualization + GIF; supports stochastic sampling.
+* `repro_maze_result.sh` – Single-run Maze JSON result summary (paper-style comparable fields).
+* `repro_maze_multi_seed.sh` – Multi-seed orchestration + aggregate JSON (+ optional CSV).
 
 Examples:
 ```
