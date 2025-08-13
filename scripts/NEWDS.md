@@ -162,3 +162,98 @@ print('Wrote',root)
 ```
 Run training afterward pointing `data_path` to `data/mydomain-demo`.
 
+
+---
+## 8. Game Integration Tips
+
+### 8.1 Choosing a Representation
+Pick a fixed canvas (H x W) that upper-bounds your largest board/state. Flatten row‑major.
+
+Token design patterns:
+* Tile Types: Reserve contiguous id block (e.g. floor=1, wall=2, enemy=3, treasure=4, exit=5).
+* Entity Layers: If multiple entities can share a cell, either (a) compose into a single categorical token via small combinatorial code table, or (b) render priority order (e.g. entity overrides terrain) then optionally add a second pass with an auxiliary mask (can be concatenated as another “puzzle variant” within same group to give multi-channel info).
+* Attributes (HP, status): Quantize into buckets and map to extra tokens (e.g. HP 0..9 -> +10 offset). Keep total vocab tight; avoid sparse huge id ranges.
+* Fog / Unknown: dedicate a token (e.g. 0=PAD for off‑board, 1=UNKNOWN, shift real content by +2) if partial observability matters.
+* Temporal Context: Provide k recent frames as k separate examples inside the same group (share puzzle_identifier) so the model can infer state transitions; order can be implied by position in group (earlier indices) or by reserving small “time marker” tokens written into unused tail cells.
+
+### 8.2 Grouping Strategy
+Use group_indices to package together: [current_state, goal_spec, hint_examples, past_frames]. Model can attend across them during training (balanced sampler). For inference you can feed the same multi-example group to get a plan conditioned on all pieces.
+
+Example grouping (platformer level assist):
+1. Frame t-2
+2. Frame t-1
+3. Current frame t
+4. Goal sketch (desired end layout / objective markers)
+Labels: predicted next optimal frame (t+1) or a solved/annotated path overlay. All four inputs + one label = 5 examples; puzzle_indices prefixes reflect 5.
+
+### 8.3 Using ACT Steps (Iterative Refinement)
+Each forward pass internally performs multiple halting steps. For interactive UIs you can visualize intermediate logits to show the “thinking” progression (use visualization code as reference). You can early‑stop after a fixed number of steps for latency-sensitive frames (set arch.halt_max_steps lower) or run full to maximize accuracy during pause screens.
+
+### 8.4 Inference Loop Patterns
+Real-time (per frame):
+1. Serialize current game state grid -> int32 token array.
+2. Batch multiple concurrent player instances (stack along batch dim) to amortize GPU call.
+3. Run model -> logits (B, L, vocab).
+4. Derive next action map: for each cell take argmax or sample top-k; optionally extract a special “action head” region if you reserve final cells to encode global action proposals (e.g. last 16 positions store high-level action tokens instead of board cells).
+5. Convert predicted tokens back to engine events (mapping table reverse of encoding).
+
+Turn-based / puzzle solve:
+* Run once; if output not consistent (e.g. violates rules) apply rule-based repair or re-sample low-confidence cells (logit margin < threshold).
+* Optionally perform iterative self‑refinement: feed model’s own prediction as new input variant inside same group to allow another pass (curriculum style) — treat each iteration as a fresh forward; stop when stable.
+
+### 8.5 Confidence & Fallback
+* Per-cell confidence: softmax(logits) max probability. If below e.g. 0.55, trigger heuristic / search fallback just for that cell.
+* Whole-plan confidence: mean max prob over non-pad cells or exact_accuracy from evaluate harness run on a validation holdout.
+* Multi-sample: temperature sample K variants (temp 0.8..1.0) and pick one maximizing downstream heuristic score (e.g. path length feasibility, resource balance).
+
+### 8.6 Puzzle Identifier Usage
+Assign stable puzzle_identifiers for recurring levels so the learned embedding captures persistent structural quirks (layout style). For procedurally generated levels you can:
+* Use 0 for all (no specialization), or
+* Hash a coarse level signature (dimensions, biome type) -> small id space (cap at, say, 256). Track mapping in identifiers.json; avoid explosive growth.
+
+### 8.7 Streaming / Partial Updates
+If only a small region changes (player moves 1 tile), you can either:
+* Re-encode full grid (simplest), or
+* Maintain cached embedding states (requires model surgery — not provided). Start with full re-encode; optimize later if needed.
+
+### 8.8 Tooling Hooks
+* Use `evaluate.py` with a custom tiny test folder representing current live snapshot series to get structured metrics / dumps (e.g. save logits to drive UI heatmaps).
+* Adapt `visualize_*_cli.py` logic to build an in-engine overlay (heatmap of correctness probability or planned path updated each step).
+
+### 8.9 Latency Optimization
+* Reduce seq_len: pack only relevant viewport instead of entire world.
+* Reduce cycles: lower `arch.H_cycles` / `arch.L_cycles` or cap halting steps.
+* Mixed precision (if on CUDA) once stable.
+* Batch multiple NPC decisions together.
+
+### 8.10 Typical Encoding Table (Example)
+| Concept | Token Id |
+|--------|----------|
+| PAD / off-map | 0 |
+| Unknown fog | 1 |
+| Floor | 2 |
+| Wall | 3 |
+| Player | 4 |
+| Enemy | 5 |
+| Exit / Goal | 6 |
+| Key Item | 7 |
+Extend contiguously; update vocab_size accordingly.
+
+Reverse mapping must exist in engine code for rendering / action selection.
+
+### 8.11 Action Extraction Pattern
+If the model’s task is state prediction but you want discrete actions (e.g., move N/E/S/W):
+1. Predict next-state grid.
+2. Compare player position cell between current & predicted to infer intended move.
+3. If unchanged & low confidence globally -> fallback to scripted AI.
+Alternative: dedicate final 4 cells of sequence to action logits (encode them as dummy positions in training labels), allowing direct action decoding.
+
+### 8.12 Safety / Rule Enforcement
+Always validate model proposals against game rules (path passable, inventory constraints). Quick filter before committing updates keeps training objective pure (predict optimal) while runtime stays safe.
+
+### 8.13 Logging & Telemetry
+Store (state, prediction, confidence, chosen action) tuples periodically; you can later distill a smaller policy or fine-tune HRM on failure cases (active learning loop).
+
+---
+End of game dev tips.
+
